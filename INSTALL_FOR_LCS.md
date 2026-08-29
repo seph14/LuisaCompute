@@ -125,13 +125,17 @@ install tree is purely for LCS's find_package consumption.
   backend's validation asserts). After refreshing either install tree,
   **rebuild every consumer** (LCS, NewTypeEngine) before running it. Do not
   mix: engine binaries and `luisa-*.dll`s deployed next to them must come from
-  the same install generation.
-- **Debug installs need their targets built first.** `cmake --install` from
-  `build-dx-debug` aborts at `src/coro` if only `luisa-compute-backend-dx` was
-  built, silently leaving `install-dx-debug/bin/luisa-backend-dx.dll` stale
-  (the script's critical-file check does not cover the backends). Build at
-  least `luisa-compute-coro`, `luisa-compute-osl`, and
-  `luisa-compute-backend-dx` in the debug tree before installing.
+  the same install generation. **This includes `luisa-validation-layer.dll`**
+  — it proxies the whole `DeviceInterface` ABI, and a stale one crashes with
+  access violations in `Stream::_dispatch` even when every other DLL is fresh.
+- **The script now builds what it installs.** Before installing, it
+  incrementally builds `luisa-compute-coro`, `luisa-compute-osl`,
+  `luisa-compute-backend-dx`, `luisa-compute-validation-layer` (plus
+  `luisa-compute-backend-vk` in release), and fails loudly if any target
+  fails to build. This exists because `cmake --install` used to abort at
+  `src/coro` when coro wasn't built and then silently re-copy stale backend
+  DLLs as "Up-to-date" (this bit us twice in the Aug 2026 sync: the debug
+  backend and the debug validation layer both shipped stale).
 - **If `cmake --install` ever stops failing at the tests step** (e.g. upstream
   fixes the test install rules, or you build all the test exes), the script
   will still work — the failure path is the expected one but not required.
