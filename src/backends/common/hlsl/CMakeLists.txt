@@ -36,6 +36,15 @@ if (LUISA_COMPUTE_ENABLE_DX OR LUISA_COMPUTE_ENABLE_VULKAN)
             bc7_trymode02.dxil
             bc7_trymode137.dxil
             bc7_trymode456.dxil
+            bc6_header
+            bc6_trymode_g10cs
+            bc6_trymode_le10cs
+            bc6_encode_block
+            bc7_header
+            bc7_trymode_456cs
+            bc7_trymode_137cs
+            bc7_trymode_02cs
+            bc7_encode_block
     )
     list(TRANSFORM LUISA_COMPUTE_HLSL_DEVICE_LIB_SOURCES PREPEND ${CMAKE_CURRENT_LIST_DIR}/builtin/)
     set(LUISA_COMPUTE_HLSL_EMBEDDED_SOURCE

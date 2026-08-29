@@ -57,6 +57,22 @@ LC_HLSL_DECL_VARNAME(bc7_trymode137_dxil)
 LC_HLSL_DECL_VARNAME(bc7_trymode456_dxil)
 LC_HLSL_DECL_VARNAME(spv_alias_bytes)
 LC_HLSL_DECL_VARNAME(bindless_upload_vk_bytes)
+#ifndef LUISA_BIN_2_OBJ
+// Raw BC texture-compression HLSL sources. Needed to recompile the builtin
+// BC kernels at runtime when the embedded prebuilt .dxil caches are rejected
+// (e.g. after a shader-cache header version bump). Only provided by the
+// CMake-generated embed aggregate; the xmake bin2obj rule currently only
+// picks up .bytes/.dxil files.
+LC_HLSL_DECL_VARNAME(bc6_header)
+LC_HLSL_DECL_VARNAME(bc6_trymode_g10cs)
+LC_HLSL_DECL_VARNAME(bc6_trymode_le10cs)
+LC_HLSL_DECL_VARNAME(bc6_encode_block)
+LC_HLSL_DECL_VARNAME(bc7_header)
+LC_HLSL_DECL_VARNAME(bc7_trymode_456cs)
+LC_HLSL_DECL_VARNAME(bc7_trymode_137cs)
+LC_HLSL_DECL_VARNAME(bc7_trymode_02cs)
+LC_HLSL_DECL_VARNAME(bc7_encode_block)
+#endif
 }
 
 namespace lc_hlsl {
@@ -103,6 +119,17 @@ static HLSLCompressedHeader get_hlsl_builtin(luisa::string_view ss) {
             LC_HLSL_INSERT_VARNAME(bc7_trymode137_dxil, "bc7_trymode137.dxil")
             LC_HLSL_INSERT_VARNAME(bc7_trymode456_dxil, "bc7_trymode456.dxil")
             LC_HLSL_INSERT_VARNAME(accel_process_vk_motion_bytes, "accel_process_vk_motion.bytes")
+#ifndef LUISA_BIN_2_OBJ
+            LC_HLSL_INSERT_VARNAME(bc6_header, "bc6_header")
+            LC_HLSL_INSERT_VARNAME(bc6_trymode_g10cs, "bc6_trymode_g10cs")
+            LC_HLSL_INSERT_VARNAME(bc6_trymode_le10cs, "bc6_trymode_le10cs")
+            LC_HLSL_INSERT_VARNAME(bc6_encode_block, "bc6_encode_block")
+            LC_HLSL_INSERT_VARNAME(bc7_header, "bc7_header")
+            LC_HLSL_INSERT_VARNAME(bc7_trymode_456cs, "bc7_trymode_456cs")
+            LC_HLSL_INSERT_VARNAME(bc7_trymode_137cs, "bc7_trymode_137cs")
+            LC_HLSL_INSERT_VARNAME(bc7_trymode_02cs, "bc7_trymode_02cs")
+            LC_HLSL_INSERT_VARNAME(bc7_encode_block, "bc7_encode_block")
+#endif
         }
     };
     static Dict dict;
