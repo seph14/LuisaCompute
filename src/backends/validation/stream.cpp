@@ -79,7 +79,10 @@ void Stream::check_compete() {
     for (auto &&iter : res_usages) {
         auto res = iter.first;
         for (auto &&stream_iter : res->info()) {
-            auto other_stream = RWResource::get<Stream>(stream_iter.first);
+            // Resources keep usage entries for streams that no longer exist
+            // (e.g. a temporary stream destroyed after a synchronized upload).
+            // Skipped, not an error: the stream instance is gone.
+            auto other_stream = RWResource::try_get<Stream>(stream_iter.first);
             if (!other_stream || other_stream == this) continue;
             auto synced_frame = stream_synced_frame(other_stream);
             if (stream_iter.second.last_frame > synced_frame) {
