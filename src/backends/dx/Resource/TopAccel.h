@@ -7,6 +7,7 @@
 using namespace luisa::compute;
 namespace lc::dx {
 class DefaultBuffer;
+class Buffer;
 class BottomAccel;
 class BboxAccel;
 class CommandBufferBuilder;
@@ -26,6 +27,20 @@ class TopAccel : public Resource {
 
     friend class BottomAccel;
     friend class BboxAccel;
+
+public:
+    // device-side transform source: column-major float4x4 matrices copied
+    // into the instance rows [first, first + count) before the build
+    struct TransformSource {
+        Buffer const *buffer = nullptr;
+        uint64_t offset = 0;
+        uint first = 0;
+        uint count = 0;
+        [[nodiscard]] explicit operator bool() const noexcept { return buffer != nullptr; }
+    };
+
+private:
+    TransformSource transformSource;
     vstd::unique_ptr<DefaultBuffer> instBuffer;
     vstd::unique_ptr<DefaultBuffer> accelBuffer;
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO topLevelPrebuildInfo;
@@ -69,12 +84,14 @@ public:
         CommandBufferBuilder &builder,
         uint64 size,
         vstd::span<AccelBuildCommand::Modification const> const &modifications,
+        TransformSource const &transformSrc,
         bool update);
     void PreProcessInst(
         EnhancedBarrierTracker &tracker,
         CommandBufferBuilder &builder,
         uint64 size,
-        vstd::span<AccelBuildCommand::Modification const> const &modifications);
+        vstd::span<AccelBuildCommand::Modification const> const &modifications,
+        TransformSource const &transformSrc);
     void Build(
         EnhancedBarrierTracker &tracker,
         CommandBufferBuilder &builder,

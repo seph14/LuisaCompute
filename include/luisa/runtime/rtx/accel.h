@@ -13,6 +13,8 @@ class Mesh;
 class Curve;
 class ProceduralPrimitive;
 class MotionInstance;
+template<typename T>
+class BufferView;
 
 namespace detail {
 // for DSL
@@ -28,9 +30,17 @@ public:
     using Modification = AccelBuildCommand::Modification;
 
 private:
+    struct TransformSource {
+        uint64_t buffer{};
+        uint64_t offset{};
+        uint first_instance{};
+        uint count{};
+        [[nodiscard]] explicit operator bool() const noexcept { return buffer != 0u; }
+    };
     luisa::unordered_map<size_t, Modification> _modifications;
     mutable luisa::spin_mutex _mtx;
     size_t _instance_count{};
+    TransformSource _transform_source;
 
 private:
     friend class Device;
@@ -126,6 +136,18 @@ public:
     void set_visibility_on_update(size_t index, uint8_t visibility_mask) noexcept;
     void set_opaque_on_update(size_t index, bool opaque) noexcept;
     void set_instance_user_id_on_update(size_t index, uint user_id) noexcept;
+
+    // set a device buffer of column-major float4x4 matrices to be copied into
+    // the instance-transform rows [first_instance, first_instance + count)
+    // by the backend during the next build() / update_instance_buffer(); the
+    // matrices never round-trip through the host. Only the transform rows are
+    // touched (visibility, opacity, user id, and the bound primitive are
+    // preserved). The stash is consumed (cleared) by the next build; if
+    // host-side modifications also target transform rows inside the range in
+    // the same build, the buffer contents win. Backends without GPU-side
+    // instance updates reject the build; a zero view clears a pending stash.
+    void set_transform_buffer_on_update(size_t first_instance,
+                                        BufferView<float4x4> transforms) noexcept;
 
     // update top-level acceleration structure's instance data without build
     [[nodiscard]] luisa::unique_ptr<Command> update_instance_buffer() noexcept;

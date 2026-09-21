@@ -386,6 +386,13 @@ public:
     }
     void visit(const AccelBuildCommand *cmd) noexcept override {
         auto accel = reinterpret_cast<TopAccel *>(cmd->handle());
+        TopAccel::TransformSource transformSrc;
+        if (cmd->has_transform_source()) {
+            transformSrc.buffer = reinterpret_cast<Buffer const *>(cmd->transform_src_buffer());
+            transformSrc.offset = cmd->transform_src_offset();
+            transformSrc.first = cmd->transform_first_instance();
+            transformSrc.count = cmd->transform_count();
+        }
         if (!cmd->update_instance_buffer_only()) {
             add_build_accel(
                 accel->PreProcess(
@@ -393,13 +400,15 @@ public:
                     *bd,
                     cmd->instance_count(),
                     cmd->modifications(),
+                    transformSrc,
                     cmd->request() == AccelBuildRequest::PREFER_UPDATE));
         } else {
             accel->PreProcessInst(
                 *state_tracker,
                 *bd,
                 cmd->instance_count(),
-                cmd->modifications());
+                cmd->modifications(),
+                transformSrc);
         }
     }
     void visit(const MeshBuildCommand *cmd) noexcept override {

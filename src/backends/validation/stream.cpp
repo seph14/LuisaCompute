@@ -431,6 +431,18 @@ void Stream::dispatch(DeviceInterface *dev, CommandList &cmd_list) {
                 } else {
                     accel->init_build = true;
                 }
+                if (c->has_transform_source()) {
+                    auto first = c->transform_first_instance();
+                    auto last = first + c->transform_count();
+                    if (last > c->instance_count()) [[unlikely]] {
+                        LUISA_ERROR(
+                            "Accel transform-buffer range [{}, {}) exceeds instance count {}.",
+                            first, last, c->instance_count());
+                    }
+                    mark_handle(c->transform_src_buffer(), Usage::READ,
+                                Range{c->transform_src_offset(),
+                                      static_cast<size_t>(c->transform_count()) * sizeof(float4x4)});
+                }
                 accel->modify(c->instance_count(), this, c->modifications());
                 mark_handle(c->handle(), Usage::WRITE, Range{});
             } break;

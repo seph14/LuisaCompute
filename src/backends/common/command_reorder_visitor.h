@@ -1023,6 +1023,17 @@ public:
     // Accel : conclude meshes and their buffer
     void visit(const AccelBuildCommand *command) noexcept override {
         auto layer = set_write(command->handle(), whole_range(), ResourceType::Accel);
+        // the transform source is read on device by the build; keep the
+        // command after any kernel that writes the buffer (and vice versa)
+        // so the copy never races its producer
+        if (auto src = command->transform_src_buffer(); src != 0u) {
+            auto range = buffer_range(
+                command->transform_src_offset(),
+                static_cast<size_t>(command->transform_count()) * sizeof(float4x4));
+            auto src_handle = static_cast<RangeHandle *>(get_handle(src, ResourceType::Buffer));
+            layer = std::max<int64_t>(layer, get_last_layer_write(src_handle, range));
+            src_handle->emplace_read_layer(range, layer);
+        }
         _max_accel_write_level = std::max<int64_t>(_max_accel_write_level, layer);
         add_command(command, layer);
     }

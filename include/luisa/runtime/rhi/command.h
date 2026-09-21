@@ -653,6 +653,14 @@ private:
     AccelBuildRequest _request;
     bool _update_instance_buffer_only;
     luisa::vector<Modification> _modifications;
+    // optional device-side transform source: matrices are read from this
+    // buffer (luisa column-major float4x4, 64 bytes per instance) and copied
+    // into the instance-descriptor rows [first, first + count) by the backend
+    // before the build; a zero buffer handle disables the path
+    uint64_t _transform_src_buffer{};
+    uint64_t _transform_src_offset{};
+    uint32_t _transform_first_instance{};
+    uint32_t _transform_count{};
 
 public:
     AccelBuildCommand(uint64_t handle, uint32_t instance_count,
@@ -667,12 +675,24 @@ public:
     void set_modifications(luisa::vector<Modification> &&modifications) noexcept {
         _modifications = std::move(modifications);
     }
+    void set_transform_source(uint64_t buffer, uint64_t offset_bytes,
+                              uint32_t first_instance, uint32_t count) noexcept {
+        _transform_src_buffer = buffer;
+        _transform_src_offset = offset_bytes;
+        _transform_first_instance = first_instance;
+        _transform_count = count;
+    }
     [[nodiscard]] auto handle() const noexcept { return _handle; }
     [[nodiscard]] auto request() const noexcept { return _request; }
     [[nodiscard]] auto instance_count() const noexcept { return _instance_count; }
     [[nodiscard]] auto modifications() const noexcept { return luisa::span{_modifications}; }
     [[nodiscard]] auto steal_modifications() noexcept { return std::move(_modifications); }
     [[nodiscard]] auto update_instance_buffer_only() const noexcept { return _update_instance_buffer_only; }
+    [[nodiscard]] auto has_transform_source() const noexcept { return _transform_src_buffer != 0u; }
+    [[nodiscard]] auto transform_src_buffer() const noexcept { return _transform_src_buffer; }
+    [[nodiscard]] auto transform_src_offset() const noexcept { return _transform_src_offset; }
+    [[nodiscard]] auto transform_first_instance() const noexcept { return _transform_first_instance; }
+    [[nodiscard]] auto transform_count() const noexcept { return _transform_count; }
     LUISA_MAKE_COMMAND_COMMON(StreamTag::COMPUTE)
 };
 

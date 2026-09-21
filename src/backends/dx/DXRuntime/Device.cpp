@@ -89,6 +89,7 @@ hlsl::ShaderCompiler *Device::compiler() {
 Device::Device(Context &&ctx, DeviceConfig const *settings)
     : set_bindless_kernel(BuiltinKernel::load_bindless_set_kernel),
       set_accel_kernel(BuiltinKernel::load_accel_set_kernel),
+      set_accel_transform_kernel(BuiltinKernel::load_accel_transform_copy_kernel),
       bc6_try_mode_g10(BuiltinKernel::load_bc6_try_mode_g10cs_kernel),
       bc6_try_mode_le10(BuiltinKernel::load_bc6_try_mode_le10cs_kernel),
       bc6_encode_block(BuiltinKernel::load_bc6_encode_block_cs_kernel),

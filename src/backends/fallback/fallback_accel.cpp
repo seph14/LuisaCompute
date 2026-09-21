@@ -52,6 +52,11 @@ FallbackAccel::~FallbackAccel() noexcept { rtcReleaseScene(_handle); }
 void FallbackAccel::build(luisa::unique_ptr<AccelBuildCommand> cmd) noexcept {
     LUISA_ASSERT(!cmd->update_instance_buffer_only(),
                  "FallbackAccel does not support update_instance_buffer_only.");
+    if (cmd->has_transform_source()) [[unlikely]] {
+        LUISA_WARNING_WITH_LOCATION(
+            "FallbackAccel does not support device-side transform-buffer "
+            "updates; the pending transforms are ignored.");
+    }
     if (auto n = cmd->instance_count(); n < _instances.size()) {
         // remove redundant geometries
         for (auto i = n; i < _instances.size(); i++) {

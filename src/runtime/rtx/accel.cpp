@@ -1,5 +1,6 @@
 #include <luisa/core/stl/algorithm.h>
 #include <luisa/ast/function_builder.h>
+#include <luisa/runtime/buffer.h>
 #include <luisa/runtime/shader.h>
 #include <luisa/core/logging.h>
 #include <luisa/runtime/rtx/mesh.h>
@@ -42,8 +43,10 @@ Accel::Accel(DeviceInterface *device, const AccelOption &option) noexcept
 Accel::Accel(Accel &&rhs) noexcept
     : Resource{std::move(rhs)},
       _modifications{std::move(rhs._modifications)},
-      _instance_count{rhs._instance_count} {
+      _instance_count{rhs._instance_count},
+      _transform_source{rhs._transform_source} {
     rhs._instance_count = 0;
+    rhs._transform_source = {};
 }
 
 Accel &Accel::operator=(Accel &&rhs) noexcept {
@@ -60,15 +63,16 @@ size_t Accel::size() const noexcept {
 bool Accel::dirty() const noexcept {
     _check_is_valid();
     std::lock_guard lck{_mtx};
-    return !_modifications.empty();
+    return !_modifications.empty() || static_cast<bool>(_transform_source);
 }
 
 Accel::~Accel() noexcept {
-    if (!_modifications.empty()) {
+    if (!_modifications.empty() || _transform_source) {
         LUISA_WARNING_WITH_LOCATION(
-            "Accel #{} destroyed with {} uncommitted modifications. "
+            "Accel #{} destroyed with {} uncommitted modifications{}. "
             "Did you forget to call build()?",
-            this->handle(), _modifications.size());
+            this->handle(), _modifications.size(),
+            _transform_source ? " and a pending transform-buffer update" : "");
     }
     if (*this) { device()->destroy_accel(handle()); }
 }
@@ -88,9 +92,17 @@ luisa::unique_ptr<Command> Accel::_build(Accel::BuildRequest request,
     // Is sort necessary?
     // luisa::sort(modifications.begin(), modifications.end(),
     //         [](auto &&lhs, auto &&rhs) noexcept { return lhs.index < rhs.index; });
-    return luisa::make_unique<AccelBuildCommand>(handle(), static_cast<uint>(_instance_count),
-                                                 request, std::move(modifications),
-                                                 update_instance_buffer_only);
+    auto command = luisa::make_unique<AccelBuildCommand>(handle(), static_cast<uint>(_instance_count),
+                                                         request, std::move(modifications),
+                                                         update_instance_buffer_only);
+    if (_transform_source) {
+        command->set_transform_source(_transform_source.buffer,
+                                      _transform_source.offset,
+                                      _transform_source.first_instance,
+                                      _transform_source.count);
+        _transform_source = {};
+    }
+    return command;
 }
 
 void Accel::emplace_back_handle(uint64_t mesh, float4x4 const &transform, uint8_t visibility_mask, bool opaque, uint user_id) noexcept {
@@ -254,6 +266,30 @@ void Accel::set_instance_user_id_on_update(size_t index, uint user_id) noexcept 
             index, Modification{static_cast<uint>(index)});
         iter->second.set_user_id(user_id);
     }
+}
+
+void Accel::set_transform_buffer_on_update(size_t first_instance,
+                                           BufferView<float4x4> transforms) noexcept {
+    _check_is_valid();
+    std::lock_guard lock{_mtx};
+    if (!transforms) {
+        _transform_source = {};
+        return;
+    }
+    auto count = transforms.size();
+    if (first_instance + count > _instance_count) [[unlikely]] {
+        LUISA_WARNING_WITH_LOCATION(
+            "Invalid transform-buffer range [{}, {}) for accel #{} with {} "
+            "instances; ignoring.",
+            first_instance, first_instance + count, handle(), _instance_count);
+        _transform_source = {};
+        return;
+    }
+    _transform_source = TransformSource{
+        transforms.handle(),
+        transforms.offset_bytes(),
+        static_cast<uint>(first_instance),
+        static_cast<uint>(count)};
 }
 
 luisa::unique_ptr<Command> Accel::update_instance_buffer() noexcept {

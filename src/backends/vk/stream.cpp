@@ -2714,6 +2714,11 @@ void CommandBuffer::execute(vstd::span<const luisa::unique_ptr<Command>> cmds) {
                 } break;
                 case Command::Tag::EAccelBuildCommand: {
                     auto c = static_cast<AccelBuildCommand const *>(cmd);
+                    if (c->has_transform_source()) [[unlikely]] {
+                        LUISA_ERROR_WITH_LOCATION(
+                            "The Vulkan backend does not support device-side "
+                            "accel transform-buffer updates.");
+                    }
                     reinterpret_cast<Tlas *>(c->handle())->pre_build(*this, c->instance_count(), *write_desc_sets, *bindless_cache, c->modifications(), c->request());
                 } break;
                 case Command::Tag::EMeshBuildCommand: {
@@ -3750,6 +3755,11 @@ void CommandBuffer::execute(vstd::span<const luisa::unique_ptr<Command>> cmds) {
                 case Command::Tag::EAccelBuildCommand: {
                     flush_all_pending();
                     auto c = static_cast<AccelBuildCommand const *>(cmd);
+                    if (c->has_transform_source()) [[unlikely]] {
+                        LUISA_ERROR_WITH_LOCATION(
+                            "The Vulkan backend does not support device-side "
+                            "accel transform-buffer updates.");
+                    }
                     reinterpret_cast<Tlas *>(c->handle())->build(*this, c->instance_count());
                     // resource_barrier->record(
                     //     BufferView{&bf},

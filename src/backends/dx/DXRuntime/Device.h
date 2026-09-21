@@ -83,6 +83,7 @@ public:
     vstd::unique_ptr<DescriptorHeap> sampler_heap;
     LazyLoadShader set_bindless_kernel;
     LazyLoadShader set_accel_kernel;
+    LazyLoadShader set_accel_transform_kernel;
 
     LazyLoadShader bc6_try_mode_g10;
     LazyLoadShader bc6_try_mode_le10;

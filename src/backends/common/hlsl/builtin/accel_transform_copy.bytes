@@ -1,0 +1,32 @@
+struct MeshInst{
+float4 p0;
+float4 p1;
+float4 p2;
+uint InstanceID:24;
+uint InstanceMask:8;
+uint InstanceContributionToHitGroupIndex:24;
+uint Flags:8;
+uint2 accelStructPtr;
+};
+StructuredBuffer<float4> _SrcBuffer:register(t0);
+RWStructuredBuffer<MeshInst> _InstBuffer:register(u0);
+cbuffer _Global:register(b0){
+uint dsp;
+uint count;
+uint first;
+}
+[numthreads(256,1,1)]
+void main(uint id:SV_DISPATCHTHREADID){
+if(id >= dsp) return;
+uint inst = first + id;
+if(inst >= count) return;
+// source is a luisa column-major float4x4 (4 consecutive float4 columns);
+// instance rows are stored row-major like Modification::set_transform
+float4 c0 = _SrcBuffer[id * 4u + 0u];
+float4 c1 = _SrcBuffer[id * 4u + 1u];
+float4 c2 = _SrcBuffer[id * 4u + 2u];
+float4 c3 = _SrcBuffer[id * 4u + 3u];
+_InstBuffer[inst].p0 = float4(c0.x, c1.x, c2.x, c3.x);
+_InstBuffer[inst].p1 = float4(c0.y, c1.y, c2.y, c3.y);
+_InstBuffer[inst].p2 = float4(c0.z, c1.z, c2.z, c3.z);
+}

@@ -129,7 +129,9 @@ void TopAccel::PreProcessInst(
     EnhancedBarrierTracker &tracker,
     CommandBufferBuilder &builder,
     uint64 size,
-    vstd::span<AccelBuildCommand::Modification const> const &modifications) {
+    vstd::span<AccelBuildCommand::Modification const> const &modifications,
+    TransformSource const &transformSrc) {
+    transformSource = transformSrc;
     auto &&input = topLevelBuildDesc.Inputs;
     if (input.NumDescs != size) update = false;
     input.NumDescs = size;
@@ -148,10 +150,16 @@ void TopAccel::PreProcessInst(
             D3D12_RESOURCE_STATE_COMMON)) {
         input.InstanceDescs = instBuffer->GetAddress();
     }
-    if (!setDesc.empty()) {
+    if (!setDesc.empty() || transformSource) {
         tracker.Record(
             BufferView(instBuffer.get(), 0, instBuffer->GetByteSize()),
             EnhancedBarrierTracker::Usage::ComputeUAV);
+    }
+    if (transformSource) {
+        tracker.Record(
+            BufferView(transformSource.buffer, transformSource.offset,
+                       static_cast<uint64_t>(transformSource.count) * sizeof(float4x4)),
+            EnhancedBarrierTracker::Usage::ComputeRead);
     }
 }
 void TopAccel::ProcessSetMap() {
@@ -239,7 +247,9 @@ size_t TopAccel::PreProcess(
     CommandBufferBuilder &builder,
     uint64 size,
     vstd::span<AccelBuildCommand::Modification const> const &modifications,
+    TransformSource const &transformSrc,
     bool update) {
+    transformSource = transformSrc;
     update &= this->update;
     auto refreshUpdate = vstd::scope_exit([&] { this->update &= update; });
     auto &&input = topLevelBuildDesc.Inputs;
@@ -278,10 +288,16 @@ size_t TopAccel::PreProcess(
     tracker.Record(
         BufferView(GetAccelBuffer(), 0, GetAccelBuffer()->GetByteSize()),
         EnhancedBarrierTracker::Usage::BuildAccel);
-    if (!setDesc.empty()) {
+    if (!setDesc.empty() || transformSource) {
         tracker.Record(
             BufferView(instBuffer.get(), 0, instBuffer->GetByteSize()),
             EnhancedBarrierTracker::Usage::ComputeUAV);
+    }
+    if (transformSource) {
+        tracker.Record(
+            BufferView(transformSource.buffer, transformSource.offset,
+                       static_cast<uint64_t>(transformSource.count) * sizeof(float4x4)),
+            EnhancedBarrierTracker::Usage::ComputeRead);
     }
     return (update ? topLevelPrebuildInfo.UpdateScratchDataSizeInBytes : topLevelPrebuildInfo.ScratchDataSizeInBytes) + sizeof(size_t);
 }
@@ -289,7 +305,10 @@ void TopAccel::Build(
     EnhancedBarrierTracker &tracker,
     CommandBufferBuilder &builder,
     BufferView const *scratchBuffer) {
-    if (Length() == 0) return;
+    if (Length() == 0) {
+        transformSource = {};
+        return;
+    }
     auto alloc = builder.get_cb()->get_alloc();
     // Update
     if (!setDesc.empty()) {
@@ -320,6 +339,41 @@ void TopAccel::Build(
             cs,
             uint3(size, 1, 1),
             properties);
+    }
+    if (transformSource) {
+        // order the set kernel's UAV writes (if any) before the transform
+        // copy so the two dispatches cannot race on the instance buffer
+        if (!setDesc.empty()) {
+            tracker.Record(
+                BufferView(instBuffer.get(), 0, instBuffer->GetByteSize()),
+                EnhancedBarrierTracker::Usage::ComputeUAV);
+            GraphicsCmdlistBarrierCallback callback(builder);
+            tracker.UpdateState(&callback);
+        }
+        auto cs = device->set_accel_transform_kernel.get(device);
+        struct CBuffer {
+            uint dsp;
+            uint count;
+            uint first;
+        };
+        auto cbuffer = alloc->get_temp_upload_buffer(sizeof(CBuffer), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        CBuffer cbValue;
+        cbValue.dsp = transformSource.count;
+        cbValue.count = Length();
+        cbValue.first = transformSource.first;
+        static_cast<UploadBuffer const *>(cbuffer.buffer)
+            ->CopyData(cbuffer.offset,
+                       {reinterpret_cast<uint8_t const *>(&cbValue), sizeof(CBuffer)});
+        BindProperty properties[3];
+        properties[0] = cbuffer;
+        properties[1] = BufferView(transformSource.buffer, transformSource.offset,
+                                   static_cast<uint64_t>(transformSource.count) * sizeof(float4x4));
+        properties[2] = BufferView(instBuffer.get());
+        builder.dispatch_compute(
+            cs,
+            uint3(transformSource.count, 1, 1),
+            properties);
+        transformSource = {};
     }
     if (scratchBuffer) {
         tracker.Record(

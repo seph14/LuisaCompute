@@ -26,6 +26,7 @@ if (LUISA_COMPUTE_ENABLE_DX OR LUISA_COMPUTE_ENABLE_VULKAN)
             accel_process_vk.bytes
             accel_process_vk_motion.bytes
             accel_process_vk.dxil
+            accel_transform_copy.bytes
             load_bdls.dxil
             load_bdls_vk.dxil
             set_accel4.dxil

@@ -41,6 +41,45 @@ ComputeShader *BuiltinKernel::load_accel_set_kernel(Device *device) {
         CacheType::Internal, true, false,
         0);
 }
+ComputeShader *BuiltinKernel::load_accel_transform_copy_kernel(Device *device) {
+    auto func = [&] {
+        hlsl::CodegenResult code;
+        code.useBufferBindless = false;
+        code.useTex2DBindless = false;
+        code.useTex3DBindless = false;
+        code.result << hlsl::CodegenUtility::ReadInternalHLSLFile("accel_transform_copy.bytes");
+        code.properties.resize(3);
+        auto &global = code.properties[0];
+        global.array_size = 1;
+        global.register_index = 0;
+        global.space_index = 0;
+        global.type = hlsl::ShaderVariableType::ConstantBuffer;
+        auto &src_buffer = code.properties[1];
+        src_buffer.array_size = 1;
+        src_buffer.register_index = 0;
+        src_buffer.space_index = 0;
+        src_buffer.type = hlsl::ShaderVariableType::StructuredBuffer;
+        auto &inst_buffer = code.properties[2];
+        inst_buffer.array_size = 1;
+        inst_buffer.register_index = 0;
+        inst_buffer.space_index = 0;
+        inst_buffer.type = hlsl::ShaderVariableType::RWStructuredBuffer;
+        return code;
+    };
+    return ComputeShader::compile_compute(
+        device->file_io,
+        device->profiler,
+        device,
+        {},
+        func,
+        {},
+        {},
+        uint3(256, 1, 1),
+        62,
+        "accel_transform_copy_v1.dxil"sv,
+        CacheType::Internal, true, false,
+        0);
+}
 ComputeShader *BuiltinKernel::load_bindless_set_kernel(Device *device) {
     auto func = [&] {
         hlsl::CodegenResult code;
