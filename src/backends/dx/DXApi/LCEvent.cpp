@@ -1,6 +1,9 @@
 #include <DXApi/LCEvent.h>
 #include <DXRuntime/CommandQueue.h>
 #include <DXRuntime/DStorageCommandQueue.h>
+// WaitOnAddress/WakeByAddressAll are exported by the OneCore umbrella
+// import library only (documented library for synchapi.h).
+#pragma comment(lib, "OneCore.lib")
 namespace lc::dx {
 LCEvent::LCEvent(Device *device, bool shared)
     : Resource(device) {
@@ -22,8 +25,13 @@ LCEvent::~LCEvent() {
 }
 
 void LCEvent::sync(uint64_t fenceIdx) const {
-    while (finished_event < fenceIdx) {
-        std::this_thread::yield();
+    // WaitOnAddress re-checks the value before blocking, so a wake between
+    // the load and the wait cannot be missed. Wakers: the executor threads
+    // after storing finished_event (under event_mtx).
+    auto cur = finished_event.load(std::memory_order_acquire);
+    while (cur < fenceIdx) {
+        WaitOnAddress(&finished_event, &cur, sizeof(cur), INFINITE);
+        cur = finished_event.load(std::memory_order_acquire);
     }
 }
 void LCEvent::signal(CommandQueue *queue, uint64_t fenceIdx) const {

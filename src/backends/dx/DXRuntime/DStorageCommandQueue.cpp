@@ -5,6 +5,9 @@
 #include <Resource/SparseTexture.h>
 #include <Resource/Buffer.h>
 #include <luisa/backends/ext/dstorage_cmd.h>
+// WaitOnAddress/WakeByAddressAll are exported by the OneCore umbrella
+// import library only (documented library for synchapi.h).
+#pragma comment(lib, "OneCore.lib")
 namespace lc::dx {
 void DStorageCommandQueue::ExecuteThread() {
     while (enabled || executedAllocators.length() != 0) {
@@ -15,6 +18,7 @@ void DStorageCommandQueue::ExecuteThread() {
             while (prev_value < fence && !executedFrame.compare_exchange_weak(prev_value, fence)) {
                 std::this_thread::yield();
             }
+            WakeByAddressAll((void *)&executedFrame);
         };
         auto ExecuteAllocator = [&](WaitQueueHandle const &b) {
             if (b.handle) {
@@ -38,9 +42,11 @@ void DStorageCommandQueue::ExecuteThread() {
             {
                 std::lock_guard lck(evt->event_mtx);
                 evt->finished_event = std::max<uint64_t>(fence, evt->finished_event);
+                WakeByAddressAll((void *)&evt->finished_event);
             }
             if (wakeupThread) {
                 executedFrame++;
+                WakeByAddressAll((void *)&executedFrame);
             }
         };
         while (true) {
@@ -58,7 +64,10 @@ void DStorageCommandQueue::ExecuteThread() {
                 ExecuteEvent);
         }
         while (enabled && executedAllocators.length() == 0) {
-            std::this_thread::yield();
+            // Producers release one token per enqueue under mtx (and the
+            // destructor before join()); the timeout is a missed-wakeup
+            // backstop only.
+            WaitForSingleObject(wakeSem, 100);
         }
     }
 }
@@ -66,6 +75,7 @@ void DStorageCommandQueue::AddEvent(LCEvent const *evt, uint64_t fenceIdx) {
     ++lastFrame;
     mtx.lock();
     executedAllocators.enqueue(evt, fenceIdx, true);
+    ReleaseSemaphore(wakeSem, 1, nullptr);
     mtx.unlock();
 }
 uint64_t DStorageCommandQueue::Execute(
@@ -248,15 +258,22 @@ uint64_t DStorageCommandQueue::Execute(
     {
         std::unique_lock lck(mtx);
         executedAllocators.enqueue(waitQueueHandle, curFrame, callbackEmpty);
+        ReleaseSemaphore(wakeSem, 1, nullptr);
         if (!callbackEmpty) {
             executedAllocators.enqueue(std::move(funcs), curFrame, true);
+            ReleaseSemaphore(wakeSem, 1, nullptr);
         }
     }
     return curFrame;
 }
 void DStorageCommandQueue::Complete(uint64_t fence) {
-    while (executedFrame < fence) {
-        std::this_thread::yield();
+    // WaitOnAddress re-checks the value before blocking, so a wake between
+    // the load and the wait cannot be missed; the reload loop handles
+    // spurious wakeups and fences beyond the woken value.
+    auto cur = executedFrame.load(std::memory_order_acquire);
+    while (cur < fence) {
+        WaitOnAddress(&executedFrame, &cur, sizeof(cur), INFINITE);
+        cur = executedFrame.load(std::memory_order_acquire);
     }
 }
 void DStorageCommandQueue::Complete() {
@@ -299,6 +316,8 @@ DStorageCommandQueue::~DStorageCommandQueue() {
         std::lock_guard lck(mtx);
         enabled = false;
     }
+    ReleaseSemaphore(wakeSem, 1, nullptr);
     thd.join();
+    CloseHandle(wakeSem);
 }
 }// namespace lc::dx

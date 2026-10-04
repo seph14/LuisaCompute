@@ -3,6 +3,9 @@
 #include <DXRuntime/CommandAllocator.h>
 #include <Resource/GpuAllocator.h>
 #include <DXApi/LCEvent.h>
+// WaitOnAddress/WakeByAddressAll are exported by the OneCore umbrella
+// import library only (documented library for synchapi.h).
+#pragma comment(lib, "OneCore.lib")
 namespace lc::dx {
 CommandQueue::CommandQueue(
     Device *device,
@@ -56,6 +59,7 @@ void CommandQueue::add_event(LCEvent const *evt, uint64_t fenceIdx) {
     ++_last_frame;
     _mtx.lock();
     _executed_allocators.enqueue(evt, fenceIdx, true);
+    ReleaseSemaphore(_wake_sem, 1, nullptr);
     _mtx.unlock();
 }
 
@@ -69,6 +73,7 @@ void CommandQueue::_execute_thread() {
                 while (prev_value < fence && !_executed_frame.compare_exchange_weak(prev_value, fence)) {
                     std::this_thread::yield();
                 }
+                WakeByAddressAll((void *)&_executed_frame);
             }
         };
         auto ExecuteAllocator = [&](AllocatorPtr &b) {
@@ -89,9 +94,11 @@ void CommandQueue::_execute_thread() {
             {
                 std::lock_guard lck(evt->event_mtx);
                 evt->finished_event = std::max<uint64_t>(fence, evt->finished_event);
+                WakeByAddressAll((void *)&evt->finished_event);
             }
             if (wakeupThread) {
                 _executed_frame++;
+                WakeByAddressAll((void *)&_executed_frame);
             }
         };
         auto ExecuteHandle = [&](WaitFence) {
@@ -114,7 +121,10 @@ void CommandQueue::_execute_thread() {
                 ExecuteHandle);
         }
         while (_enabled && _executed_allocators.length() == 0) {
-            std::this_thread::yield();
+            // Producers release one token per enqueue under _mtx (and the
+            // destructor before join()); the timeout is a missed-wakeup
+            // backstop only.
+            WaitForSingleObject(_wake_sem, 100);
         }
     }
 }
@@ -128,6 +138,7 @@ void CommandQueue::force_sync(
     alloc->complete(this, _cmd_fence.Get(), curFrame);
     alloc->reset(this);
     _executed_frame = curFrame;
+    WakeByAddressAll((void *)&_executed_frame);
 
     cb._reset();
 }
@@ -136,7 +147,9 @@ CommandQueue::~CommandQueue() {
         std::lock_guard lck(_mtx);
         _enabled = false;
     }
+    ReleaseSemaphore(_wake_sem, 1, nullptr);
     _thd.join();
+    CloseHandle(_wake_sem);
 }
 void CommandQueue::wait_frame(uint64_t lastFrame) {
     if (lastFrame > 0)
@@ -147,6 +160,7 @@ void CommandQueue::signal() {
     ThrowIfFailed(_queue->Signal(_cmd_fence.Get(), curFrame));
     _mtx.lock();
     _executed_allocators.enqueue(WaitFence{}, curFrame, true);
+    ReleaseSemaphore(_wake_sem, 1, nullptr);
     _mtx.unlock();
 }
 void CommandQueue::execute(AllocatorPtr &&alloc, vstd::vector<vstd::function<void()>> &&callbacks, luisa::span<std::pair<IDXGISwapChain *, bool>> swapChains, bool cmdlist_is_empty) {
@@ -157,18 +171,27 @@ void CommandQueue::execute(AllocatorPtr &&alloc, vstd::vector<vstd::function<voi
         if (!callbacks.empty()) {
             std::lock_guard lck{_mtx};
             _executed_allocators.enqueue(std::move(callbacks), curFrame, true);
+            ReleaseSemaphore(_wake_sem, 1, nullptr);
         }
     } else {
         std::lock_guard lck{_mtx};
         _executed_allocators.enqueue(std::move(alloc), curFrame, callbacks.empty());
-        if (!callbacks.empty())
+        ReleaseSemaphore(_wake_sem, 1, nullptr);
+        if (!callbacks.empty()) {
             _executed_allocators.enqueue(std::move(callbacks), curFrame, true);
+            ReleaseSemaphore(_wake_sem, 1, nullptr);
+        }
     }
 }
 
 void CommandQueue::complete(uint64_t fence) {
-    while (_executed_frame < fence) {
-        std::this_thread::yield();
+    // WaitOnAddress re-checks the value before blocking, so a wake between
+    // the load and the wait cannot be missed; the reload loop handles
+    // spurious wakeups and fences beyond the woken value.
+    auto cur = _executed_frame.load(std::memory_order_acquire);
+    while (cur < fence) {
+        WaitOnAddress(&_executed_frame, &cur, sizeof(cur), INFINITE);
+        cur = _executed_frame.load(std::memory_order_acquire);
     }
 }
 void CommandQueue::complete() {

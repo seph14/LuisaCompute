@@ -65,6 +65,10 @@ public:
     KILL_MOVE_CONSTRUCT(CommandQueue)
     KILL_COPY_CONSTRUCT(CommandQueue)
 private:
+    // One token released (under _mtx) per enqueue and one by the destructor
+    // before join(); lets the executor block on an empty queue. Must be
+    // constructed before _thd starts.
+    HANDLE _wake_sem = CreateSemaphoreW(nullptr, 0, 0x7fffffff, nullptr);
     // make sure thread always construct after all members
     std::thread _thd;
 };

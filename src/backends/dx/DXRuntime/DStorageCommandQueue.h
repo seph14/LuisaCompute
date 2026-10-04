@@ -60,6 +60,10 @@ public:
     KILL_COPY_CONSTRUCT(DStorageCommandQueue)
     ~DStorageCommandQueue();
 private:
+    // One token released (under mtx) per enqueue and one by the destructor
+    // before join(); lets the executor block on an empty queue. Must be
+    // constructed before thd starts.
+    HANDLE wakeSem = CreateSemaphoreW(nullptr, 0, 0x7fffffff, nullptr);
     // make sure thread always construct after all members
     std::thread thd;
 };
