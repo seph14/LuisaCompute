@@ -88,10 +88,14 @@ The script does three things on top of `cmake --install`:
    - Restores `INTERFACE_INCLUDE_DIRECTORIES` on the bundled-ext targets
      (`EASTL-interface`, `EABase`, `spdlog_header_only`, `xxhash`,
      `magic_enum`, `half`, `luisa-compute-ext-marl-interface`,
-     `luisa-compute-ext-stb-interface`, `reproc-interface`). LuisaCompute
+     `luisa-compute-ext-stb-interface`, `reproc-interface`,
+     `luisa-compute-ext-btree`). LuisaCompute
      sets these with `$<BUILD_INTERFACE:>` only, so the include path is
      stripped at install time even though the headers are installed under
-     `<prefix>/include/luisa/ext/<subdir>/`.
+     `<prefix>/include/luisa/ext/<subdir>/`. (Exception: since the Oct 2026
+     upstream merge, `luisa-compute-ext-btree` also carries
+     `$<INSTALL_INTERFACE:include/luisa/ext>`, so it works even without the
+     restore — it's in the list as insurance.)
 
 ## Consumer workflow
 
