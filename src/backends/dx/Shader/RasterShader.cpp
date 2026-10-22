@@ -439,6 +439,10 @@ ID3D12PipelineState *RasterShader::get_pso(
     }
     psoState.dsv_format = dsvFormat;
     psoState.raster_state = rasterState;
+    // The stencil reference is set dynamically with OMSetStencilRef and does
+    // not participate in D3D12 graphics pipeline creation.
+    psoState.raster_state.stencil_state.reference = 0u;
+    psoState.mesh_format_md5 = gen_md5(vstd::MD5{}, meshFormat);
     {
         std::lock_guard lck{_pso_mtx};
         idx = _pso_map.try_emplace(psoState);
@@ -463,6 +467,7 @@ ID3D12PipelineState *RasterShader::get_pso(
     pushArray(psoState.rtv_formats.data(), psoState.rtv_formats.size());
     push(psoState.dsv_format);
     push(psoState.raster_state);
+    push(psoState.mesh_format_md5);
     push(this->_md5);
     auto psoDesc = get_state(
         elements,
@@ -472,7 +477,6 @@ ID3D12PipelineState *RasterShader::get_pso(
     psoDesc.pRootSignature = this->_root_sig.Get();
     psoDesc.VS = {_vert_bin_data.data(), _vert_bin_data.size()};
     psoDesc.PS = {_pixel_bin_data.data(), _pixel_bin_data.size()};
-
     auto psoMD5 = vstd::MD5{vstd::span<const uint8_t>{reinterpret_cast<uint8_t const *>(md5Bytes.data()), md5Bytes.size()}};
     auto psoName = psoMD5.to_string(false);
     auto psoStream = _device->file_io->read_shader_cache(psoName);

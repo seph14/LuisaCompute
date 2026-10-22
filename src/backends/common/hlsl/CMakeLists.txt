@@ -8,6 +8,7 @@ if (LUISA_COMPUTE_ENABLE_DX OR LUISA_COMPUTE_ENABLE_VULKAN)
             hlsl_header_fallback.bytes
             raytracing_header.bytes
             raytracing_motion_header.bytes
+            fallback_rtx_header.bytes
             tex2d_bindless.bytes
             tex3d_bindless.bytes
             compute_quad.bytes
@@ -21,9 +22,7 @@ if (LUISA_COMPUTE_ENABLE_DX OR LUISA_COMPUTE_ENABLE_VULKAN)
             auto_diff.bytes
             reduce.bytes
             bindless_upload.bytes
-            bindless_upload_vk.bytes
             accel_process.bytes
-            accel_process_vk.bytes
             accel_process_vk_motion.bytes
             accel_process_vk.dxil
             accel_transform_copy.bytes

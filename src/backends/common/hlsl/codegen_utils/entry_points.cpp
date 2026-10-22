@@ -1,16 +1,16 @@
 // Main Codegen Entry Points
 
-#include <cstdio>
 #include "../hlsl_codegen.h"
 #include "../codegen_stack_data.h"
 #include "../register_indexer.h"
 #include "../constant_printer.h"
 #include "../register_indexer.h"
 
+#include <luisa/dsl/raster/raster_interpolation.h>
+
 #ifndef LC_NO_HLSL_BUILTIN
 #include "../builtin/hlsl_builtin.hpp"
 #endif
-bool shown_buffer_warning = false;
 #ifdef LC_NO_HLSL_BUILTIN
 namespace lc_hlsl {
 struct HLSLCompressedHeader {
@@ -21,29 +21,6 @@ static HLSLCompressedHeader get_hlsl_builtin(luisa::string_view ss) { return {};
 }// namespace lc_hlsl
 #endif
 namespace lc::hlsl {
-#ifdef LUISA_ENABLE_IR
-void glob_variables_with_grad(Function f, vstd::unordered_set<Variable> &gradient_variables) noexcept {
-    if (f.requires_autodiff())
-        traverse_expressions<true>(
-            f.body(),
-            [&](auto expr) noexcept {
-                if (expr->tag() == Expression::Tag::CALL) {
-                    if (auto call = static_cast<const CallExpr *>(expr);
-                        call->op() == CallOp::GRADIENT ||
-                        call->op() == CallOp::GRADIENT_MARKER ||
-                        call->op() == CallOp::REQUIRES_GRADIENT) {
-                        LUISA_ASSERT(!call->arguments().empty() &&
-                                         call->arguments().front()->tag() == Expression::Tag::REF,
-                                     "Invalid gradient function call.");
-                        auto v = static_cast<const RefExpr *>(call->arguments().front())->variable();
-                        gradient_variables.emplace(v);
-                    }
-                }
-            },
-            [](auto) noexcept {},
-            [](auto) noexcept {});
-}
-#endif
 vstd::string_view CodegenUtility::ReadInternalHLSLFile(vstd::string_view name) {
     auto data = lc_hlsl::get_hlsl_builtin(name);
     return {static_cast<char const *>(data.ptr), data.size};
@@ -96,7 +73,20 @@ vstd::MD5 CodegenUtility::GetTypeMD5(Function func) {
 }
 
 namespace detail {
-size_t AddHeader(CallOpSet const &ops, vstd::StringBuilder &builder, bool isRaster, bool is_spirv, bool fallback, bool linalg) {
+[[nodiscard]] bool uses_accel_intrinsics(CallOpSet const &ops) noexcept {
+    return ops.test(CallOp::RAY_TRACING_INSTANCE_TRANSFORM) ||
+           ops.test(CallOp::RAY_TRACING_INSTANCE_USER_ID) ||
+           ops.test(CallOp::RAY_TRACING_INSTANCE_VISIBILITY_MASK) ||
+           ops.test(CallOp::RAY_TRACING_SET_INSTANCE_TRANSFORM) ||
+           ops.test(CallOp::RAY_TRACING_SET_INSTANCE_OPACITY) ||
+           ops.test(CallOp::RAY_TRACING_SET_INSTANCE_USER_ID) ||
+           ops.test(CallOp::RAY_TRACING_SET_INSTANCE_VISIBILITY) ||
+           ops.test(CallOp::RAY_TRACING_INSTANCE_MOTION_MATRIX) ||
+           ops.test(CallOp::RAY_TRACING_INSTANCE_MOTION_SRT) ||
+           ops.test(CallOp::RAY_TRACING_SET_INSTANCE_MOTION_MATRIX) ||
+           ops.test(CallOp::RAY_TRACING_SET_INSTANCE_MOTION_SRT);
+}
+size_t AddHeader(CallOpSet const &ops, vstd::StringBuilder &builder, bool isRaster, bool is_spirv, bool fallback, bool linalg, bool fallback_rtx) {
     builder << CodegenUtility::ReadInternalHLSLFile(fallback ? "hlsl_header_fallback" : "hlsl_header");
     if (is_spirv) {
         // Vulkan versions typed bindless descriptors per slot. DXIL keeps its
@@ -116,7 +106,18 @@ groupshared uint _vk_wg_copy_buf[4096];
 )";
     }
     size_t immutable_size = builder.size();
-    if (ops.uses_raytracing()) {
+    // Software ray tracing: the traversal of builtin/fallback_rtx_header.bytes
+    // replaces both the inline-query header (there is no `RayQuery` and no
+    // `RaytracingAccelerationStructure` on a device without hardware ray tracing)
+    // and the instance-accessor header.  It is *not* appended here: the traversal
+    // resolves the regions of its acceleration structure through the device's
+    // global bindless heap (`bdls`, declared by GenerateBindless), which is part
+    // of the per-shader binding block, so `Codegen` appends it there - right after
+    // the declarations and before the generated body.  `bindless_common` is then
+    // not added below either.
+    auto fallback_traversal =
+        fallback_rtx && (ops.uses_raytracing() || uses_accel_intrinsics(ops));
+    if (!fallback_rtx && ops.uses_raytracing()) {
         builder << CodegenUtility::ReadInternalHLSLFile("raytracing_header");
     }
     if (ops.test(CallOp::DETERMINANT)) {
@@ -128,7 +129,9 @@ groupshared uint _vk_wg_copy_buf[4096];
     if (ops.test(CallOp::INDIRECT_SET_DISPATCH_KERNEL) || ops.test(CallOp::INDIRECT_SET_DISPATCH_COUNT)) {
         builder << CodegenUtility::ReadInternalHLSLFile("indirect");
     }
-    if (ops.test(CallOp::BUFFER_SIZE) || ops.test(CallOp::TEXTURE_SIZE) || ops.test(CallOp::BYTE_BUFFER_SIZE)) {
+    if (ops.test(CallOp::BUFFER_SIZE) || ops.test(CallOp::TEXTURE_SIZE) ||
+        ops.test(CallOp::BYTE_BUFFER_SIZE) ||
+        ops.test(CallOp::ACCEL_SIZE)) {
         builder << CodegenUtility::ReadInternalHLSLFile("resource_size");
     }
     if (linalg || ops.uses_cooperative()) {
@@ -154,16 +157,10 @@ groupshared uint _vk_wg_copy_buf[4096];
         ops.test(CallOp::TYPED_BINDLESS_COOPERATIVE_VECTOR_STORE)) {
         useBindless = true;
     }
-    if (useBindless) {
+    if (useBindless && !fallback_traversal) {
         builder << CodegenUtility::ReadInternalHLSLFile("bindless_common");
     }
-    if (ops.test(CallOp::RAY_TRACING_INSTANCE_TRANSFORM) ||
-        ops.test(CallOp::RAY_TRACING_INSTANCE_USER_ID) ||
-        ops.test(CallOp::RAY_TRACING_INSTANCE_VISIBILITY_MASK) ||
-        ops.test(CallOp::RAY_TRACING_SET_INSTANCE_TRANSFORM) ||
-        ops.test(CallOp::RAY_TRACING_SET_INSTANCE_OPACITY) ||
-        ops.test(CallOp::RAY_TRACING_SET_INSTANCE_USER_ID) ||
-        ops.test(CallOp::RAY_TRACING_SET_INSTANCE_VISIBILITY)) {
+    if (!fallback_rtx && uses_accel_intrinsics(ops)) {
         builder << CodegenUtility::ReadInternalHLSLFile("accel_header");
     }
     if (ops.test(CallOp::COPYSIGN)) {
@@ -189,11 +186,29 @@ bool IsCBuffer(Variable::Tag t);
 }// namespace detail
 
 // Main compute kernel codegen
-CodegenResult CodegenUtility::Codegen(Function kernel, luisa::string_view native_code, uint custom_mask, bool isSpirV, bool noRegister, bool enable_debug_info) {
+CodegenResult CodegenUtility::Codegen(Function kernel, luisa::string_view native_code, uint custom_mask, bool isSpirV, bool noRegister, bool enable_debug_info, bool enable_fast_math, bool fallback_rtx) {
     opt = CodegenStackData::Allocate(this);
     opt->isSpirv = isSpirV;
+    opt->fallback_rtx = fallback_rtx;
     opt->noRegister = noRegister;
     opt->enable_debug_info = enable_debug_info;
+    opt->enable_fast_math = enable_fast_math;
+    auto fallback_traversal = false;
+    if (fallback_rtx) {
+        // A software (fallback) acceleration structure reaches the shader as a
+        // *bindless heap* - the traversal resolves the region of a referenced
+        // BLAS by its slot (fallback_rtx_layout.h) - so a shader that traces or
+        // touches instances declares the device's global bindless heap
+        // (`bdls`, `GenerateBindless`).  A hardware-path shader never sets this,
+        // so its generated source, its hash and its cached artifact are
+        // unchanged.
+        auto builtin_ops = kernel.propagated_builtin_callables();
+        fallback_traversal =
+            builtin_ops.uses_raytracing() || detail::uses_accel_intrinsics(builtin_ops);
+        if (fallback_traversal) {
+            opt->useBufferBindless = true;
+        }
+    }
     auto disposeOpt = vstd::scope_exit([&] {
         CodegenStackData::DeAllocate(std::move(opt));
     });
@@ -218,7 +233,7 @@ CodegenResult CodegenUtility::Codegen(Function kernel, luisa::string_view native
     if (enable_debug_info) {
         finalResult << "#define LUISA_DEBUG_INFO 1\n";
     }
-    uint64 immutableHeaderSize = detail::AddHeader(kernel.propagated_builtin_callables(), finalResult, false, isSpirV, noRegister, kernel.use_cooperative_operations());
+    uint64 immutableHeaderSize = detail::AddHeader(kernel.propagated_builtin_callables(), finalResult, false, isSpirV, noRegister, kernel.use_cooperative_operations(), fallback_rtx);
     finalResult << native_code << "\n//"sv;
     finalResult << luisa::format("{}", custom_mask);
     finalResult << '\n';
@@ -241,18 +256,52 @@ CodegenResult CodegenUtility::Codegen(Function kernel, luisa::string_view native
     // so the resulting HLSL is self-contained.
     CodegenFunction(kernel, codegenData, nonEmptyCbuffer || enable_debug_info, true);
     if (isSpirV) {
+        // Software (fallback) ray tracing: the acceleration view of a fallback
+        // `accel` argument addresses the shared acceleration buffer with absolute
+        // uint4 handles, so the traversal also needs the absolute uint4 offset of
+        // that tree's region ("accelBase", fallback_rtx_header.bytes).  It travels
+        // in the push-constant block, right after the fixed dispatch block the
+        // command encoder writes first (`IndirectDispatchPushConstants`, 32 bytes):
+        // one 32-bit word per `accel` argument, in kernel-argument order - the same
+        // offset and order `Device::_create_shader_hlsl` sizes the block for and the
+        // command encoder writes them to (stream.cpp).  A device whose fallback is
+        // off adds nothing, so its push-constant block stays exactly as it was.
+        auto fallback_accel_base_count = 0u;
+        if (opt->fallback_rtx) {
+            for (auto &&arg : kernel.arguments()) {
+                fallback_accel_base_count += arg.type()->is_accel() ? 1u : 0u;
+            }
+        }
+        auto emit_fallback_accel_bases = [&](luisa::string_view prefix) {
+            for (auto &&arg : kernel.arguments()) {
+                if (!arg.type()->is_accel()) { continue; }
+                varData << prefix;
+                GetVariableName(kernel, arg, varData);
+                varData << "Base;\n"sv;
+            }
+        };
         if (opt->noRegister) {
             varData << R"(
 	struct _CBType{
 	uint4 v;
-	};
+)"sv;
+            if (fallback_accel_base_count != 0u) {
+                varData << "	uint4 _lc_fallback_dispatch_tail;\n"sv;
+                emit_fallback_accel_bases("	uint "sv);
+            }
+            varData << R"(	};
 	[[vk::push_constant]] ConstantBuffer<_CBType> dsp_c;
 	)"sv;
         } else {
             varData << R"(
 struct _CBType{
 uint4 v;
-};
+)"sv;
+            if (fallback_accel_base_count != 0u) {
+                varData << "uint4 _lc_fallback_dispatch_tail;\n"sv;
+                emit_fallback_accel_bases("uint "sv);
+            }
+            varData << R"(};
 [[vk::push_constant]] ConstantBuffer<_CBType> dsp_c:register(b0);
 )"sv;
         }
@@ -281,6 +330,16 @@ uint4 v;
     PreprocessCodegenProperties(properties, varData, indexer, nonEmptyCbuffer || enable_debug_info, false, isSpirV, bind_count);
     CodegenProperties(properties, varData, kernel, 0, indexer, bind_count);
     PostprocessCodegenProperties(finalResult, kernel.requires_autodiff());
+    if (fallback_traversal) {
+        // The software (fallback) traversal is appended to the binding block, not
+        // to the immutable header: it resolves the regions of its acceleration
+        // structure through the device's global bindless heap (`bdls`), which is
+        // declared by `GenerateBindless` above, and it has to precede the
+        // generated body that calls into it.  `bindless_common` is added here for
+        // the same reason (and `AddHeader` then leaves it out).
+        varData << CodegenUtility::ReadInternalHLSLFile("bindless_common");
+        varData << CodegenUtility::ReadInternalHLSLFile("fallback_rtx_header");
+    }
     finalResult << varData << incrementalFunc << codegenData;
     if (!isSpirV) {
         // https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signature-limits
@@ -303,12 +362,14 @@ uint4 v;
 
 // Ray tracing pipeline codegen for motion blur
 // Generates a lib_6_5 HLSL with raygen/miss/closesthit entry points
-CodegenResult CodegenUtility::RayTracingCodegen(Function kernel, luisa::string_view native_code, uint custom_mask, bool isSpirV, bool noRegister, bool enable_debug_info) {
+CodegenResult CodegenUtility::RayTracingCodegen(Function kernel, luisa::string_view native_code, uint custom_mask, bool isSpirV, bool noRegister, bool enable_debug_info, bool enable_fast_math, bool fallback_rtx) {
     opt = CodegenStackData::Allocate(this);
     opt->isSpirv = isSpirV;
+    opt->fallback_rtx = fallback_rtx;
     opt->noRegister = noRegister;
     opt->isRayTracing = true;
     opt->enable_debug_info = enable_debug_info;
+    opt->enable_fast_math = enable_fast_math;
     auto disposeOpt = vstd::scope_exit([&] {
         CodegenStackData::DeAllocate(std::move(opt));
     });
@@ -324,7 +385,7 @@ CodegenResult CodegenUtility::RayTracingCodegen(Function kernel, luisa::string_v
     if (enable_debug_info) {
         finalResult << "#define LUISA_DEBUG_INFO 1\n";
     }
-    uint64 immutableHeaderSize = detail::AddHeader(kernel.propagated_builtin_callables(), finalResult, false, isSpirV, noRegister, kernel.use_cooperative_operations());
+    uint64 immutableHeaderSize = detail::AddHeader(kernel.propagated_builtin_callables(), finalResult, false, isSpirV, noRegister, kernel.use_cooperative_operations(), fallback_rtx);
     // Add motion blur ray tracing header (miss/closesthit entry points + _TraceClosestMotion)
     finalResult << ReadInternalHLSLFile("raytracing_motion_header");
     finalResult << native_code << "\n//"sv;
@@ -399,10 +460,14 @@ CodegenResult CodegenUtility::RasterCodegen(
     uint custom_mask,
     bool isSpirV,
     bool noRegister,
-    bool enable_debug_info) {
+    bool enable_debug_info,
+    bool enable_fast_math,
+    bool fallback_rtx) {
     opt = CodegenStackData::Allocate(this);
     opt->isSpirv = isSpirV;
+    opt->fallback_rtx = fallback_rtx;
     opt->enable_debug_info = enable_debug_info;
+    opt->enable_fast_math = enable_fast_math;
     // CodegenStackData::ThreadLocalSpirv() = false;
     opt->kernel = vertFunc;
     opt->noRegister = noRegister;
@@ -422,7 +487,7 @@ CodegenResult CodegenUtility::RasterCodegen(
     }
     auto opSet = vertFunc.propagated_builtin_callables();
     opSet.propagate(pixelFunc.propagated_builtin_callables());
-    uint64 immutableHeaderSize = detail::AddHeader(opSet, finalResult, true, isSpirV, noRegister, vertFunc.use_cooperative_operations() || pixelFunc.use_cooperative_operations());
+    uint64 immutableHeaderSize = detail::AddHeader(opSet, finalResult, true, isSpirV, noRegister, vertFunc.use_cooperative_operations() || pixelFunc.use_cooperative_operations(), fallback_rtx);
     finalResult << native_code << "\n//"sv;
     finalResult << luisa::format("{}", custom_mask);
     finalResult << '\n';
@@ -436,14 +501,67 @@ CodegenResult CodegenUtility::RasterCodegen(
         // If member_attributes are not set (e.g. from DSL LUISA_STRUCT without
         // Clang annotations), default: member 0 = position, rest = TEXCOORDs.
         bool hasAttrs = (v2pMembers.size() == v2pAttrs.size());
+        auto emit_interpolation_modifier = [&](size_t index,
+                                               const Type *type) noexcept {
+            auto interpolation = RasterInterpolation::DEFAULT;
+            if (hasAttrs &&
+                v2pAttrs[index].key ==
+                    raster_interpolation_attribute_key) {
+                if (!parse_raster_interpolation(
+                        v2pAttrs[index], interpolation)) {
+                    LUISA_ERROR(
+                        "Invalid raster interpolation mode '{}'.",
+                        v2pAttrs[index].value);
+                }
+            }
+            auto element = type->is_vector() ? type->element() : type;
+            auto floating = element->is_float16() ||
+                            element->is_float32();
+            if (interpolation == RasterInterpolation::DEFAULT) {
+                interpolation = floating ?
+                                    RasterInterpolation::CENTER_PERSPECTIVE :
+                                    RasterInterpolation::FLAT;
+            }
+            if (interpolation != RasterInterpolation::FLAT &&
+                !floating) {
+                LUISA_ERROR(
+                    "Perspective, centroid, and sample interpolation "
+                    "require a floating-point varying.");
+            }
+            switch (interpolation) {
+                case RasterInterpolation::CENTER_PERSPECTIVE: break;
+                case RasterInterpolation::CENTER_NO_PERSPECTIVE:
+                    codegenData << "noperspective "sv;
+                    break;
+                case RasterInterpolation::CENTROID_PERSPECTIVE:
+                    codegenData << "centroid "sv;
+                    break;
+                case RasterInterpolation::CENTROID_NO_PERSPECTIVE:
+                    codegenData << "centroid noperspective "sv;
+                    break;
+                case RasterInterpolation::SAMPLE_PERSPECTIVE:
+                    codegenData << "sample "sv;
+                    break;
+                case RasterInterpolation::SAMPLE_NO_PERSPECTIVE:
+                    codegenData << "sample noperspective "sv;
+                    break;
+                case RasterInterpolation::FLAT:
+                    codegenData << "nointerpolation "sv;
+                    break;
+                case RasterInterpolation::DEFAULT:
+                    LUISA_ERROR(
+                        "Unresolved default raster interpolation.");
+            }
+        };
         size_t memberIdx = 0;
         bool pos = false;
         for (auto &&i : v2pMembers) {
-            bool is_sv_pos = hasAttrs
-                ? (v2pAttrs[memberIdx].key == "position"sv)
-                : (memberIdx == 0); // default: first member is SV_POSITION
+            bool is_sv_pos = hasAttrs ? (v2pAttrs[memberIdx].key == "position"sv) : (memberIdx == 0);// default: first member is SV_POSITION
             if (!is_sv_pos && opt->isSpirv) {
                 codegenData << luisa::format("[[vk::location({})]] ", memberIdx - 1);
+            }
+            if (!is_sv_pos) {
+                emit_interpolation_modifier(memberIdx, i);
             }
             GetTypeName(*i, codegenData, Usage::READ);
             codegenData << " v"sv << vstd::to_string(memberIdx);
@@ -505,7 +623,7 @@ uint obj_id:register(b0);
             "uv0"sv, "vertex_id"sv, "instance_id"sv, "is_front_face"sv};
         static constexpr vstd::string_view uintSVKeys[] = {
             "instance_id"sv, "vertex_id"sv, "is_front_face"sv};
-        size_t uintSVIdx = 0; // tracks which SV_* key to assign for uint members
+        size_t uintSVIdx = 0;// tracks which SV_* key to assign for uint members
         opt->internalStruct.try_emplace(appdataType, "_mesh");
         codegenData << "struct _mesh{\n"sv;
         for (auto i : vstd::range(appdataMems.size())) {
@@ -526,7 +644,7 @@ uint obj_id:register(b0);
                 if (member == Type::of<uint>()) {
                     auto testIter = attributes.find(attrKey);
                     if (testIter != attributes.end()) {
-                        auto sem = testIter->second.first; // e.g. "NORMAL", "SV_InstanceID"
+                        auto sem = testIter->second.first;// e.g. "NORMAL", "SV_InstanceID"
                         if (sem.size() < 3 || !(sem[0] == 'S' && sem[1] == 'V' && sem[2] == '_')) {
                             // uint mapped to non-SV semantic — redirect to SV_* key
                             if (uintSVIdx < std::size(uintSVKeys)) {
@@ -602,7 +720,7 @@ uint obj_id:register(b0);
         vert_arg_offset = std::max(vert_arg_offset, static_cast<size_t>(i.uid() + 1));
     }
     opt->argOffset = vert_arg_offset;
-    CodegenPixel(pixelFunc, codegenData, nonEmptyCbuffer);
+    CodegenPixel(pixelFunc, codegenData, nonEmptyCbuffer || enable_debug_info);
     codegenData << "#endif\n"sv;
 
     opt->funcType = CodegenStackData::FuncType::Callable;
@@ -655,10 +773,6 @@ void CodegenUtility::CodegenFunction(Function func, vstd::StringBuilder &result,
             i.decode(printer);
             result << ";\n"sv;
         }
-#ifdef LUISA_ENABLE_IR
-        vstd::unordered_set<Variable> grad_vars;
-        glob_variables_with_grad(func, grad_vars);
-#endif
         if (func.tag() == Function::Tag::KERNEL) {
             opt->funcType = CodegenStackData::FuncType::Kernel;
             if (opt->isRayTracing) {
@@ -728,11 +842,7 @@ void main(uint3 thdId:SV_GroupThreadId,uint3 dspId:SV_DispatchThreadID,uint3 grp
 
             StringStateVisitor vis(func, result, this);
             vis.sharedVariables = &opt->sharedVariable;
-            vis.VisitFunction(
-#ifdef LUISA_ENABLE_IR
-                grad_vars,
-#endif
-                func);
+            vis.VisitFunction(func);
         }
         result << "}\n"sv;
     };
